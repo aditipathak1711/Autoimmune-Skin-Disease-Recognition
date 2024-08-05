@@ -1,96 +1,345 @@
-from keras.layers import Input, Lambda, Dense, Flatten
-from keras.models import Model
-from keras.applications.vgg16 import VGG16
-from keras.applications.vgg16 import preprocess_input
-from keras.preprocessing import image
-from keras.preprocessing.image import ImageDataGenerator
-from keras.models import Sequential
+import os
 import numpy as np
-from glob import glob
+import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image
+from tqdm import tqdm
+import hashlib
+import cv2
 
+# For displaying images
+import IPython.display as display
+
+# Ignore warnings
 import warnings
-warnings.filterwarnings("ignore", category=FutureWarning)
-
-IMAGE_SIZE = [224, 224]
-from google.colab import drive
-drive.mount('/content/drive')
-!ls '/content/drive'
-
-train_path = '/content/drive/MyDrive/skindiseasedataset/train'
-test_path = '/content/drive/MyDrive/skindiseasedataset/test'
-
-vgg = VGG16(input_shape=IMAGE_SIZE + [3], weights='imagenet', include_top=False)
-
-for layer in vgg.layers:
-  layer.trainable = False
-folders = glob('/content/drive/MyDrive/skindiseasedataset/train/*')
-print(len(folders))
-x = Flatten()(vgg.output)
-prediction = Dense(len(folders), activation='softmax')(x)
-model = Model(inputs=vgg.input, outputs=prediction)
-model.summary()
-
-from keras import optimizers
-
-
-adam = optimizers.Adam()
-model.compile(loss='binary_crossentropy',
-              optimizer=adam,
-              metrics=['accuracy'])
-
-
-train_datagen = ImageDataGenerator(
-    preprocessing_function=preprocess_input,
-    rotation_range=40,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    fill_mode='nearest')
-
-test_datagen = ImageDataGenerator(
-    preprocessing_function=preprocess_input,
-    rotation_range=40,
-    width_shift_range=0.2,
-    height_shift_range=0.2,
-    shear_range=0.2,
-    zoom_range=0.2,
-    horizontal_flip=True,
-    fill_mode='nearest')
-
-train_set = train_datagen.flow_from_directory(train_path,
-                                                 target_size = (224, 224),
-                                                 batch_size = 32,
-                                                 class_mode = 'categorical')
-
-test_set = test_datagen.flow_from_directory(test_path,
-                                            target_size = (224, 224),
-                                            batch_size = 32,
-                                            class_mode = 'categorical')
-
-
-from datetime import datetime
-from keras.callbacks import ModelCheckpoint
+warnings.filterwarnings('ignore')
 
 
 
-checkpoint = ModelCheckpoint(filepath='mymodel.h5', 
-                               verbose=2, save_best_only=True)
-
-callbacks = [checkpoint]
-
-start = datetime.now()
-
-model_history=model.fit_generator(
-  train_set,
-  validation_data=test_set,
-  epochs=10,
-  steps_per_epoch=5,
-  validation_steps=32,
-    callbacks=callbacks ,verbose=2)
 
 
-duration = datetime.now() - start
-print("Training completed in time: ", duration)
+
+
+# **Loading and visualization of data/images**
+
+# Define the path to your dataset
+dataset_path = '/kaggle/input/autoimmune-skin-disorder-dataset/dataset 2/dataset'
+
+# List all the classes (folder names)
+classes = os.listdir(dataset_path)
+print("Classes:", classes)
+
+# Count number of images per class
+num_images_per_class = {cls: len(os.listdir(os.path.join(dataset_path, cls))) for cls in classes}
+print("Number of images per class:", num_images_per_class)
+
+# Plot the number of images per class
+plt.figure(figsize=(10, 5))
+sns.barplot(x=list(num_images_per_class.keys()), y=list(num_images_per_class.values()))
+plt.title('Number of Images per Class')
+plt.xlabel('Class')
+plt.ylabel('Number of Images')
+plt.show()
+
+
+
+
+
+
+
+
+# **Preprocess(Only Resize(224)) Images**
+
+# Function to load an image
+def load_image(path):
+    try:
+        # Use OpenCV to handle different formats
+        image = cv2.imread(path)
+        if image is None:
+            return None
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(image)
+    except Exception as e:
+        print(f"Error loading image {path}: {e}")
+        return None
+
+# Function to preprocess an image (resize to a fixed size)
+def preprocess_image(image, target_size=(224, 224)):
+    return image.resize(target_size)
+
+
+
+
+
+# **Computing Image Hashes for Duplicate Detection**
+
+# Function to compute the hash of an image
+def compute_image_hash(image):
+    image_array = np.array(image)
+    image_bytes = image_array.tobytes()
+    return hashlib.md5(image_bytes).hexdigest()
+
+# Compute hashes for all images
+image_hashes = {}
+for cls in classes:
+    image_hashes[cls] = []
+    class_path = os.path.join(dataset_path, cls)
+    for image_name in tqdm(os.listdir(class_path), desc=f'Processing {cls}'):
+        image_path = os.path.join(class_path, image_name)
+        image = load_image(image_path)
+        if image is not None:
+            preprocessed_image = preprocess_image(image)
+            image_hash = compute_image_hash(preprocessed_image)
+            image_hashes[cls].append((image_name, image_hash))
+
+
+
+# **Check for Duplicate Images**
+
+
+# Check for duplicates within each class
+duplicates = {}
+for cls in classes:
+    hash_dict = {}
+    for image_name, image_hash in image_hashes[cls]:
+        if image_hash in hash_dict:
+            if cls not in duplicates:
+                duplicates[cls] = []
+            duplicates[cls].append((hash_dict[image_hash], image_name))
+        else:
+            hash_dict[image_hash] = image_name
+
+# Print duplicates
+for cls, dupes in duplicates.items():
+    print(f"Class: {cls}")
+    for dupe in dupes:
+        print(f"Duplicate Images: {dupe[0]} and {dupe[1]}")
+
+
+
+# **Save Cleaned Dataset**
+
+import shutil
+from collections import defaultdict
+
+# Directory for the cleaned dataset
+output_dir = 'cleaned_dataset'
+os.makedirs(output_dir, exist_ok=True)
+
+# Store images that are not duplicates
+unique_images = defaultdict(list)
+
+# Function to save unique images
+def save_unique_images():
+    for cls, images in unique_images.items():
+        class_dir = os.path.join(output_dir, cls)
+        os.makedirs(class_dir, exist_ok=True)
+        for idx, (image_name, image_path) in enumerate(images):
+            new_image_name = f"{cls}_{idx + 1}.jpg"  # Using JPG extension; change if necessary
+            new_image_path = os.path.join(class_dir, new_image_name)
+            shutil.copy(image_path, new_image_path)
+
+# Check for duplicates within each class and keep unique images
+for cls in classes:
+    hash_dict = {}
+    class_path = os.path.join(dataset_path, cls)
+    for image_name, image_hash in image_hashes[cls]:
+        image_path = os.path.join(class_path, image_name)
+        if image_hash not in hash_dict:
+            hash_dict[image_hash] = image_name
+            unique_images[cls].append((image_name, image_path))
+
+# Save the cleaned dataset
+save_unique_images()
+
+print(f"Cleaned dataset saved to {output_dir}")
+
+
+# Define the path to your dataset
+dataset_path = '/kaggle/working/cleaned_dataset'
+
+# List all the classes (folder names)
+classes = os.listdir(dataset_path)
+print("Classes:", classes)
+
+# Count number of images per class
+num_images_per_class = {cls: len(os.listdir(os.path.join(dataset_path, cls))) for cls in classes}
+print("Number of images per class:", num_images_per_class)
+
+# Plot the number of images per class
+plt.figure(figsize=(10, 5))
+sns.barplot(x=list(num_images_per_class.keys()), y=list(num_images_per_class.values()))
+plt.title('Number of Images per Class')
+plt.xlabel('Class')
+plt.ylabel('Number of Images')
+plt.show()
+
+
+
+
+
+# **convert the images to one image type**
+
+import os
+from PIL import Image
+
+def convert_images_to_jpg(input_dir, output_dir):
+    # Ensure the output directory exists
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Iterate through each class folder
+    for class_name in os.listdir(input_dir):
+        class_path = os.path.join(input_dir, class_name)
+        if os.path.isdir(class_path):
+            # Create a corresponding folder in the output directory
+            output_class_path = os.path.join(output_dir, class_name)
+            os.makedirs(output_class_path, exist_ok=True)
+            
+            # Iterate through each image in the class folder
+            for image_name in os.listdir(class_path):
+                input_image_path = os.path.join(class_path, image_name)
+                try:
+                    # Open the image and convert it to JPG
+                    with Image.open(input_image_path) as img:
+                        rgb_img = img.convert('RGB')
+                        # Create the output image path
+                        output_image_path = os.path.join(output_class_path, os.path.splitext(image_name)[0] + '.jpg')
+                        # Save the image as JPG
+                        rgb_img.save(output_image_path, 'JPEG')
+                        print(f"Converted {input_image_path} to {output_image_path}")
+                except Exception as e:
+                    print(f"Error converting {input_image_path}: {e}")
+
+# Define the input and output directories
+input_directory = '/kaggle/working/cleaned_dataset'
+output_directory = '/kaggle/working/dataset'
+
+# Run the conversion
+convert_images_to_jpg(input_directory, output_directory)
+
+
+# **defining cleaned dataset path**
+
+# Define the path to your dataset
+dataset_path = '/kaggle/working/dataset'
+
+# List all the classes (folder names)
+classes = os.listdir(dataset_path)
+print("Classes:", classes)
+
+# Count number of images per class
+num_images_per_class = {cls: len(os.listdir(os.path.join(dataset_path, cls))) for cls in classes}
+print("Number of images per class:", num_images_per_class)
+
+# Plot the number of images per class
+plt.figure(figsize=(10, 5))
+sns.barplot(x=list(num_images_per_class.keys()), y=list(num_images_per_class.values()))
+plt.title('Number of Images per Class')
+plt.xlabel('Class')
+plt.ylabel('Number of Images')
+plt.show()
+
+
+
+#**TEST-DENSENET**
+
+import os
+import tensorflow as tf
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from sklearn.metrics import classification_report, confusion_matrix
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+
+# Define paths to the folders
+base_dir = '/kaggle/working/dataset'
+categories = ['Vitiligo', 'normal skin ', 'Psoriasis', 'lichen']
+
+# Create ImageDataGenerators
+train_datagen = ImageDataGenerator(rescale=1./255, validation_split=0.2)
+test_datagen = ImageDataGenerator(rescale=1./255)
+
+# Prepare the training and validation data
+train_generator = train_datagen.flow_from_directory(
+    base_dir,
+    classes=categories,
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='training'
+)
+
+validation_generator = train_datagen.flow_from_directory(
+    base_dir,
+    classes=categories,
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    subset='validation'
+)
+
+# Prepare the test data
+test_generator = test_datagen.flow_from_directory(
+    base_dir,
+    classes=categories,
+    target_size=(224, 224),
+    batch_size=32,
+    class_mode='categorical',
+    shuffle=False
+)
+
+# Load the pretrained DenseNet121 model
+base_model = tf.keras.applications.DenseNet121(weights='imagenet', include_top=False, input_shape=(224, 224, 3))
+
+# Add custom layers on top of the base model
+x = base_model.output
+x = tf.keras.layers.GlobalAveragePooling2D()(x)
+x = tf.keras.layers.Dense(1024, activation='relu')(x)
+predictions = tf.keras.layers.Dense(len(categories), activation='softmax')(x)
+
+# Create the final model
+model = tf.keras.Model(inputs=base_model.input, outputs=predictions)
+
+# Freeze the layers of the base model
+for layer in base_model.layers:
+    layer.trainable = False
+
+# Compile the model
+model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+
+# Train the model
+history = model.fit(
+    train_generator,
+    epochs=10,
+    validation_data=validation_generator
+)
+
+# Evaluate the model on the test data
+test_loss, test_accuracy = model.evaluate(test_generator)
+print(f'Test accuracy: {test_accuracy:.2f}')
+
+# Predict on the test data
+Y_pred = model.predict(test_generator)
+y_pred = np.argmax(Y_pred, axis=1)
+y_true = test_generator.classes
+
+# Classification report
+print('Classification Report')
+print(classification_report(y_true, y_pred, target_names=categories))
+
+# Confusion matrix
+cm = confusion_matrix(y_true, y_pred)
+plt.figure(figsize=(10, 8))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=categories, yticklabels=categories)
+plt.xlabel('Predicted')
+plt.ylabel('True')
+plt.title('Confusion Matrix')
+plt.show()
+
+
+
+
+
+
+
